@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
+import rich_blocks
+
 
 ROOT = Path(__file__).resolve().parents[1]
 POSTS = json.loads((ROOT / "content" / "posts.json").read_text(encoding="utf-8"))
@@ -69,7 +71,7 @@ def page_head(title: str, description: str, path: str, schema: object, og_type: 
   <meta property="og:image" content="{esc(image_url)}">
   <meta property="og:image:alt" content="{esc(image_alt)}">
   <meta name="twitter:card" content="summary_large_image">
-  <script type="application/ld+json">{json.dumps(schema, ensure_ascii=False)}</script>
+  <script type="application/ld+json">{json.dumps(schema, ensure_ascii=False).replace("</", "<\\/")}</script>
 </head>
 <body>
   <a class="skip-link" href="#main">انتقل إلى المحتوى</a>
@@ -202,6 +204,7 @@ def build_article(post: dict, posts_by_slug: dict[str, dict]) -> None:
     title = f"{post.get('seo_title', post['title'])} | أوركيد"
     description = post["summary"]
     preview = post.get("featured") or post.get("visual")
+    rich = post.get("rich")
     schema = {
         "@context": "https://schema.org",
         "@graph": [
@@ -221,6 +224,11 @@ def build_article(post: dict, posts_by_slug: dict[str, dict]) -> None:
         ],
     }
     paragraphs = "\n".join(f"<p>{esc(p)}</p>" for p in post["intro"])
+    takeaway = esc(post["takeaway"])
+    if rich:
+        schema = rich_blocks.article_schema(post, SITE, BRAND, f"{SITE}/assets/orkeed-mark.svg", "مدونة أوركيد لحلول التقنية")
+        paragraphs = rich_blocks.paragraphs(post["intro"])
+        takeaway = rich_blocks.inline(post["takeaway"])
     visual = post.get("visual")
     featured = post.get("featured")
     figure = ""
@@ -239,18 +247,26 @@ def build_article(post: dict, posts_by_slug: dict[str, dict]) -> None:
           <figcaption>صورة توضيحية للمقال</figcaption>
         </figure>"""
     sections = []
-    for index, section in enumerate(post["sections"], 1):
+    for index, section in enumerate([] if rich else post["sections"], 1):
         section_paragraphs = "\n".join(f"<p>{esc(p)}</p>" for p in section["paragraphs"])
         bullets = ""
         if section.get("bullets"):
             bullets = "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in section["bullets"]) + "</ul>"
         sections.append(f'<section id="section-{index}"><h2>{esc(section["heading"])}</h2>{section_paragraphs}{bullets}</section>')
+    answer_box = faq_html = sources_html = ""
+    if rich:
+        sections = [rich_blocks.render_sections(post)]
+        answer_box = rich_blocks.render_answer(post)
+        faq_html = rich_blocks.render_faq(post)
+        sources_html = rich_blocks.render_sources(post)
     related = "\n".join(article_card(posts_by_slug[slug]) for slug in post["related"])
     external = EXTERNAL_READING.get(slug)
     external_reading = (
         f'<aside class="external-reading"><span>قراءة مرتبطة</span><a href="{esc(external[1])}">{esc(external[0])} ←</a><p>{esc(external[2])}</p></aside>'
         if external else ""
     )
+    if rich:
+        external_reading = rich_blocks.render_link_out(post) or external_reading
     product = PRODUCT_READING.get(slug)
     product_reading = (
         f'<aside class="external-reading"><span>من دليل EMPID الرسمي</span><a href="{esc(product[1])}">{esc(product[0])} ←</a><p>{esc(product[2])}</p></aside>'
@@ -266,8 +282,8 @@ def build_article(post: dict, posts_by_slug: dict[str, dict]) -> None:
     </div></header>
     {featured_figure}
     <div class="wrap article-layout">
-      <aside class="article-aside"><span>في هذا المقال</span><nav aria-label="أقسام المقال">{''.join(f'<a href="#section-{i}">{esc(s["heading"])}</a>' for i,s in enumerate(post['sections'],1))}<a href="#next-step">خطوة عملية</a></nav></aside>
-      <div class="article-body">{paragraphs}{figure}{''.join(sections)}<section class="article-next" id="next-step"><p class="section-kicker">خطوة عملية</p><h2>{esc(post['takeaway_title'])}</h2><p>{esc(post['takeaway'])}</p></section>{external_reading}{product_reading}
+      <aside class="article-aside"><span>في هذا المقال</span><nav aria-label="أقسام المقال">{''.join(f'<a href="#section-{i}">{esc(s["heading"])}</a>' for i,s in enumerate(post['sections'],1))}{'<a href="#faq">أسئلة شائعة</a>' if rich and post.get('faq') else ''}<a href="#next-step">خطوة عملية</a></nav></aside>
+      <div class="article-body{' rich-article' if rich else ''}">{answer_box}{paragraphs}{figure}{''.join(sections)}{faq_html}<section class="article-next" id="next-step"><p class="section-kicker">خطوة عملية</p><h2>{esc(post['takeaway_title'])}</h2><p>{takeaway}</p></section>{sources_html}{external_reading}{product_reading}
         <div class="article-cta"><p>إذا كنت تهيئ هذا المسار لفريقك، أخبرنا ما الذي يحتاج إلى ترتيب.</p><a class="button button-gold" href="mailto:info@orkeed.com?subject={quote(post['subject'])}">تحدث مع أوركيد <span aria-hidden="true">↗</span></a></div>
       </div>
     </div>
@@ -277,13 +293,17 @@ def build_article(post: dict, posts_by_slug: dict[str, dict]) -> None:
 """
     dest = ROOT / "blog" / slug / "index.html"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(page_head(title, description, path, schema, visual=preview) + body + footer(), encoding="utf-8")
+    head = page_head(title, description, path, schema, visual=preview)
+    if rich:
+        head = rich_blocks.add_head(head, post)
+    dest.write_text(head + body + footer(), encoding="utf-8")
 
 
 def build_sitemap() -> None:
     urls = ["/", "/blog/", "/blog/empid/"] + [f"/blog/{post['slug']}/" for post in POSTS]
     lines = ['<?xml version="1.0" encoding="UTF-8"?>', '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
-    lines += [f"  <url><loc>{SITE}{url}</loc></url>" for url in urls]
+    dates = {f"/blog/{p['slug']}/": p.get("updated", p.get("published")) for p in POSTS if p.get("rich")}
+    lines += [f"  <url><loc>{SITE}{url}</loc>" + (f"<lastmod>{dates[url]}</lastmod>" if dates.get(url) else "") + "</url>" for url in urls]
     lines.append("</urlset>")
     (ROOT / "sitemap.xml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
